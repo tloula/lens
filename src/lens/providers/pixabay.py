@@ -57,9 +57,9 @@ class PixabayProvider:
 
     def search(self, query: str, *, page: int, limit: int, orientation: str | None) -> SearchResult:
         if len(query) > 100:
-            raise LensError("Pixabay queries must be at most 100 characters.")
+            raise LensError("Pixabay queries must be at most 100 characters.", status=422)
         if orientation == "square":
-            raise LensError("Pixabay only filters landscape or portrait orientation.")
+            raise LensError("Pixabay only filters landscape or portrait orientation.", status=422)
         params: dict[str, Any] = {
             "q": query,
             "page": page,
@@ -81,7 +81,7 @@ class PixabayProvider:
         try:
             hits = data["hits"]
             if not hits:
-                raise LensError("Pixabay photo not found.")
+                raise LensError("Pixabay photo not found.", status=404)
             return self._photo(hits[0])
         except (KeyError, TypeError, ValueError):
             raise LensError("Invalid Pixabay photo response.") from None

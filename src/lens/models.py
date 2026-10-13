@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, fields
 from typing import Any
 
+# Photo IDs become URL path segments and default file names, so keep them inert.
+SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,200}")
+
 
 class LensError(RuntimeError):
-    """A failure whose message is safe to show to users and agents (never contains secrets)."""
+    """A failure whose message is safe to show to users and agents (never contains secrets).
+
+    ``status`` is the HTTP status ``lens.server`` responds with. The default is 424 rather
+    than 502 because CDNs such as Cloudflare replace origin 502 bodies with their own page.
+    """
+
+    def __init__(self, message: str, *, status: int = 424) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -31,6 +43,8 @@ class Photo:
             values["downloads"] = {str(k): str(v) for k, v in dict(data["downloads"]).items()}
         except (KeyError, TypeError, ValueError) as exc:
             raise LensError("Invalid photo metadata.") from exc
+        if not SAFE_ID.fullmatch(values["id"]) or not SAFE_ID.fullmatch(values["provider"]):
+            raise LensError("Invalid photo metadata.")
         return cls(**values)
 
 

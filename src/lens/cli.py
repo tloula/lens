@@ -118,9 +118,12 @@ def download(
 ) -> None:
     """Download a photo plus a <file>.photo.json sidecar holding its credit and checksum."""
     target = Path(output) if output else None
-    if output and output.endswith(("/", "\\")):
-        Path(output).mkdir(parents=True, exist_ok=True)
     photo = open_source(config, provider).get(photo_id)
+    if target and output and output.endswith(("/", "\\")):
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise LensError(f"Could not create {target}: {exc}") from None
     emit(save_photo(photo, target, size=size).summary())
 
 

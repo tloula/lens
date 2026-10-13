@@ -31,6 +31,7 @@ def create_router(
     authentication in ``dependencies`` (for example ``[Depends(require_user)]``).
     """
     router = APIRouter(prefix=prefix, tags=["photos"], dependencies=list(dependencies))
+    cache = cache or ResponseCache()
 
     def provider(name: str) -> Provider:
         if name not in PROVIDERS:
@@ -51,7 +52,7 @@ def create_router(
                 client.search, query, page=page, limit=limit, orientation=orientation
             )
         except LensError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from None
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from None
 
     @router.get("/{provider_name}/{photo_id}")
     async def get_photo(provider_name: str, photo_id: str) -> Photo:
@@ -59,6 +60,6 @@ def create_router(
         try:
             return await run_in_threadpool(client.get, photo_id)
         except LensError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from None
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from None
 
     return router

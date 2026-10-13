@@ -66,7 +66,11 @@ class RemoteSource:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         provider_class(provider)
-        url = urlsplit(base_url)
+        try:
+            url = urlsplit(base_url)
+            url.port  # noqa: B018 - raises ValueError for malformed ports.
+        except ValueError:
+            raise LensError("Backend URL is malformed.") from None
         secure = url.scheme == "https" or (url.scheme == "http" and url.hostname in LOOPBACK)
         if (
             not secure
@@ -101,6 +105,10 @@ class RemoteSource:
                 response = client.get(url, params=params, headers=headers)
         except httpx.HTTPError:
             raise LensError("Could not reach the photo backend.") from None
+        if response.is_redirect:
+            # Never follow: the bearer token must only go to the configured backend.
+            location = response.headers.get("location", "another URL")
+            raise LensError(f"Photo backend redirected to {location}; use that URL as the backend.")
         if response.is_error:
             raise LensError(_error_message(response))
         try:
@@ -142,4 +150,8 @@ def _error_message(response: httpx.Response) -> str:
         return f"Photo backend rejected the credentials (HTTP {status}). {detail}".strip()
     if status == 404 and not detail:
         return "Photo backend route or photo not found (HTTP 404)."
+    if not detail and status >= 500:
+        return (
+            f"Photo backend returned HTTP {status}; the backend or a proxy in front of it failed."
+        )
     return f"Photo backend returned HTTP {status}: {detail or 'request failed'}"

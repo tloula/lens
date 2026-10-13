@@ -66,3 +66,12 @@ def test_fetch_enforces_size_and_format(mock_http, monkeypatch: pytest.MonkeyPat
 def test_validate_image_rejects_empty() -> None:
     with pytest.raises(LensError):
         validate_image(b"")
+
+
+def test_existing_output_fails_before_downloading(mock_http, tmp_path: Path) -> None:
+    requests = mock_http(lambda request: httpx.Response(200, content=jpeg()))
+    existing = tmp_path / "hero.jpg"
+    existing.write_bytes(b"x")
+    with pytest.raises(LensError, match="already exists"):
+        save_photo(photo(), existing)
+    assert not requests

@@ -104,12 +104,13 @@ def save_photo(
 
     Existing files are never overwritten.
     """
+    explicit = output if output is not None and not output.is_dir() else None
+    if explicit:
+        _ensure_free(explicit)  # Fail before spending provider quota on the download.
     content, mime = fetch_image(photo, size, transport=transport)
-    name = f"{photo.provider}-{photo.id}{EXTENSIONS[mime]}"
-    file = Path(name) if output is None else output / name if output.is_dir() else output
+    file = explicit or (output or Path()) / f"{photo.provider}-{photo.id}{EXTENSIONS[mime]}"
     metadata = sidecar_path(file)
-    if file.exists() or metadata.exists():
-        raise LensError(f"{file} or its .photo.json already exists; choose another --output.")
+    _ensure_free(file)
     digest = hashlib.sha256(content).hexdigest()
     record = {"photo": asdict(photo), "size": size, "content_type": mime, "sha256": digest}
     try:
@@ -122,14 +123,23 @@ def save_photo(
     return Download(file, metadata, mime, digest, photo)
 
 
+def _ensure_free(file: Path) -> None:
+    if file.exists() or sidecar_path(file).exists():
+        raise LensError(f"{file} or its .photo.json already exists; choose another --output.")
+
+
 def load_download(file: Path) -> tuple[Photo, bytes, str]:
     """Read a downloaded photo and verify it still matches its sidecar."""
     try:
+        if file.stat().st_size > MAX_IMAGE_BYTES:
+            raise LensError("Photo exceeds the 25 MB limit.")
         record = json.loads(sidecar_path(file).read_text(encoding="utf-8"))
         content = file.read_bytes()
         photo = Photo.from_dict(record["photo"])
         expected = record["sha256"]
-    except (OSError, ValueError, KeyError, TypeError, LensError):
+    except LensError:
+        raise
+    except (OSError, ValueError, KeyError, TypeError):
         raise LensError(f"Missing or invalid {sidecar_path(file).name}; download again.") from None
     if hashlib.sha256(content).hexdigest() != expected:
         raise LensError("Photo differs from its download metadata; download it again.")

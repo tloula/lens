@@ -26,7 +26,7 @@ class PexelsProvider:
         cache: ResponseCache | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        self.api_key = api_key
+        self.api_key = api_key  # Pexels has no caching requirement, so ``cache`` is unused.
         self.transport = transport
 
     def _api(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:

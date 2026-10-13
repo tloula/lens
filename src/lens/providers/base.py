@@ -8,10 +8,19 @@ from typing import Any, ClassVar, Protocol
 
 import httpx
 
+from lens.cache import ResponseCache
 from lens.models import LensError, Photo, SearchResult
 
 
 class Provider(Protocol):
+    def __init__(
+        self,
+        api_key: str | None,
+        *,
+        cache: ResponseCache | None = None,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None: ...
+
     name: ClassVar[str]
     label: ClassVar[str]
     # HTTPS hosts that may serve this provider's image bytes.
@@ -55,11 +64,11 @@ def get_json(
         raise LensError(f"Could not reach the {label} API.") from None
     status = response.status_code
     if status == 429:
-        raise LensError(f"{label} rate limit reached; retry later.")
+        raise LensError(f"{label} rate limit reached; retry later.", status=429)
     if status in (401, 403):
         raise LensError(f"{label} rejected the API key.")
     if status == 404:
-        raise LensError(f"{label} photo not found.")
+        raise LensError(f"{label} photo not found.", status=404)
     if status == 400:
         raise LensError(f"{label} rejected the request; check the API key and parameters.")
     if response.is_error:
@@ -81,7 +90,7 @@ def require_key(label: str, api_key: str | None) -> str:
 
 def positive_id(label: str, photo_id: str) -> str:
     if not photo_id.isdecimal() or int(photo_id) < 1:
-        raise LensError(f"{label} photo IDs are positive integers.")
+        raise LensError(f"{label} photo IDs are positive integers.", status=422)
     return photo_id
 
 

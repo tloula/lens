@@ -12,7 +12,7 @@ uv run lens search "cozy coffee shop" --orientation landscape --limit 5
 uv run lens download 8352847 --output images/hero.jpg
 ```
 
-`uv run` builds the environment on first use. Without uv, run `pip install .` and then call `lens` directly. To install it for use from any directory, run `uv tool install git+https://github.com/tloula/lens`.
+This needs [uv](https://docs.astral.sh/uv/) (`pip install uv`) and Python 3.11 or newer; `uv run` builds the environment on first use. Without uv, run `pip install .` and then call `lens` directly. To install it for use from any directory, run `uv tool install git+https://github.com/tloula/lens`.
 
 ## Agent workflow
 
@@ -55,6 +55,8 @@ app.include_router(
 )
 ```
 
+Provider failures return HTTP 404, 422, 429, or 424 rather than 502, because CDNs such as Cloudflare replace 502 responses with their own page. In containers, set `LENS_CACHE_DIR` to a writable directory, or pass `cache=ResponseCache(path)`, so the Pixabay cache works.
+
 Point the CLI at it with `--backend https://app.example.com/api/photos` or a config file. The config file is `~/.config/lens/config.toml`, or `%APPDATA%\lens\config.toml` on Windows (override it with `LENS_CONFIG`):
 
 ```toml
@@ -68,6 +70,8 @@ token_command = "my-app auth token"   # prints a bearer token, like a git creden
 ## Library
 
 ```python
+from pathlib import Path
+
 from lens.download import save_photo
 from lens.sources import DirectSource, RemoteSource
 

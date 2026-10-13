@@ -10,14 +10,14 @@ from lens.providers.base import Provider
 from lens.providers.pexels import PexelsProvider
 from lens.providers.pixabay import PixabayProvider
 
-PROVIDERS: dict[str, type[PixabayProvider] | type[PexelsProvider]] = {
+PROVIDERS: dict[str, type[Provider]] = {
     PixabayProvider.name: PixabayProvider,
     PexelsProvider.name: PexelsProvider,
 }
 DEFAULT_PROVIDER = PixabayProvider.name
 
 
-def provider_class(name: str) -> type[PixabayProvider] | type[PexelsProvider]:
+def provider_class(name: str) -> type[Provider]:
     try:
         return PROVIDERS[name]
     except KeyError:
