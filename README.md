@@ -1,6 +1,6 @@
 # lens
 
-Easy stock-photo access for AI agents. One CLI searches, previews, and downloads photos with the attribution already worked out, so an agent can illustrate a blog post or a web page without extra setup or an MCP server. Pixabay is the default provider and Pexels is also supported. Every command prints JSON.
+Easy stock-photo access for AI agents. One CLI searches, previews, and downloads photos with the attribution already worked out, so an agent can illustrate a blog post or a web page without extra setup. It also runs as a remote MCP server, so Claude can use it as a connector. Pixabay is the default provider and Pexels is also supported. Every command prints JSON.
 
 ## Quick start
 
@@ -66,6 +66,26 @@ token_command = "my-app auth token"   # prints a bearer token, like a git creden
 ```
 
 `LENS_BACKEND`, `LENS_PROVIDER`, `LENS_TOKEN_COMMAND`, and `LENS_BACKEND_TOKEN` override the file. The config file holds only non-secret settings.
+
+## MCP server
+
+`lens-mcp` (`pip install "lens[mcp]"`) serves the same search as a remote MCP server at `/mcp`, with provider keys kept on the server. It has three read-only tools: `search_photos`, `view_photo` (returns the medium preview as an image so the model can judge it), and `get_photo` (metadata with download URLs). Download the chosen size right away rather than hotlinking it, and keep its `credit_markdown`.
+
+| Variable | Purpose |
+| --- | --- |
+| `LENS_PIXABAY_API_KEY` / `PIXABAY_API_KEY` | Provider key, as for the CLI (`LENS_PEXELS_API_KEY` for Pexels). |
+| `LENS_MCP_AUTH` | `github` (default; for claude.ai connectors), `token` (static bearer, for Claude Code or scripts), or `none` (local only). |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | A GitHub OAuth app whose callback URL is `https://<host>/auth/callback`. |
+| `LENS_ALLOWED_GITHUB_LOGINS` | Comma-separated GitHub usernames allowed in. Everyone else is rejected. |
+| `LENS_BASE_URL` | Public URL, such as `https://lens-production.up.railway.app`. |
+| `LENS_MCP_TOKEN` | The bearer token for `LENS_MCP_AUTH=token` (at least 32 characters). |
+| `PORT` | Listen port (default 8000). |
+
+Locally: `LENS_MCP_AUTH=none uv run --extra mcp lens-mcp`, then connect to `http://localhost:8000/mcp`.
+
+**Deploy on Railway.** Create a service from this repo; the `Dockerfile` and `railway.toml` are picked up. Add a volume mounted at `/data`, which holds OAuth client registrations (`FASTMCP_HOME`) and the Pixabay response cache (`LENS_CACHE_DIR`). Generate a domain, create the GitHub OAuth app for it, and set the variables above. `/healthz` is the health check.
+
+**Connect.** In claude.ai, open Settings, then Connectors, choose Add custom connector, and enter `https://<host>/mcp`; you sign in through GitHub. For Claude Code, run `claude mcp add --transport http lens https://<host>/mcp`.
 
 ## Library
 
