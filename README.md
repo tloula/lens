@@ -69,7 +69,7 @@ token_command = "my-app auth token"   # prints a bearer token, like a git creden
 
 ## MCP server
 
-`lens-mcp` (`pip install "lens[mcp]"`) serves the same search as a remote MCP server at `/mcp`, with provider keys kept on the server. It has three read-only tools: `search_photos`, `view_photo` (returns the medium preview as an image so the model can judge it), and `get_photo` (metadata with download URLs). Download the chosen size right away rather than hotlinking it, and keep its `credit_markdown`.
+`lens-mcp` (`pip install "lens[mcp]"`) serves the same search as a remote MCP server at `/mcp`, with provider keys kept on the server. It has four read-only tools: `search_photos`, `view_photo` (returns the medium preview as an image so the model can judge it), `download_photo` (a one-hour signed link to `/download/...`, where this server fetches the image and serves it, so the client needs network access only to this server, not to Pixabay or Pexels), and `get_photo` (metadata with the provider's own download URLs). Download the chosen size right away rather than hotlinking it, and keep its `credit_markdown`.
 
 | Variable | Purpose |
 | --- | --- |
@@ -79,6 +79,7 @@ token_command = "my-app auth token"   # prints a bearer token, like a git creden
 | `LENS_ALLOWED_GITHUB_LOGINS` | Comma-separated GitHub usernames allowed in. Everyone else is rejected. |
 | `LENS_BASE_URL` | Public URL, such as `https://lens-production.up.railway.app`. |
 | `LENS_MCP_TOKEN` | The bearer token for `LENS_MCP_AUTH=token` (at least 32 characters). |
+| `LENS_DOWNLOAD_SECRET` | Optional key for signing download links. Unset, a random key is made at startup, so links stop working after a restart. |
 | `PORT` | Listen port (default 8000). |
 
 Locally: `LENS_MCP_AUTH=none uv run --extra mcp lens-mcp`, then connect to `http://localhost:8000/mcp`.

@@ -7,12 +7,17 @@ server. Auth follows ``LENS_MCP_AUTH``: ``github`` (OAuth, for claude.ai connect
 
 # No ``from __future__ import annotations``: FastMCP reads the Annotated tool signatures.
 
+import hashlib
 import hmac
 import logging
 import os
+import secrets
+import time
 from collections.abc import Callable
 from dataclasses import asdict
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal, TypeVar
+from urllib.parse import urlsplit
 
 import anyio.to_thread
 from fastmcp import FastMCP
@@ -22,14 +27,14 @@ from fastmcp.utilities.types import Image
 from pydantic import Field
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
 from lens import __version__
 from lens.cache import ResponseCache
 from lens.config import load_config
-from lens.download import fetch_image
-from lens.models import LensError, Photo
+from lens.download import EXTENSIONS, fetch_image
+from lens.models import SAFE_ID, LensError, Photo
 from lens.providers import PROVIDERS
 from lens.sources import DirectSource
 
@@ -39,11 +44,13 @@ T = TypeVar("T")
 
 READ = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True}
 GITHUB_TOKEN_CACHE_SECONDS = 300
+DOWNLOAD_TTL_SECONDS = 60 * 60
 
 INSTRUCTIONS = """lens finds free stock photos (Pixabay by default, Pexels too) with attribution
 worked out. Workflow: `search_photos` for candidates, `view_photo` to look at the most promising
-ones, then `get_photo` for download URLs. Download the chosen size to your own storage right
-away (provider URLs can expire within 24 hours) instead of hotlinking it, and put the photo's
+ones, then `download_photo` for a link that serves the full-size file through this server, so
+you never need network access to the photo provider. Fetch it right away (links expire after an
+hour) and save it to your own storage instead of hotlinking, and put the photo's
 `credit_markdown` next to the image or in the page credits. Pick images whose subject is
 obvious without explanation."""
 
@@ -120,6 +127,53 @@ def build_auth() -> AuthProvider | None:
     raise RuntimeError(f"unknown LENS_MCP_AUTH {mode!r} (github | token | none)")
 
 
+class DownloadSigner:
+    """Short-lived HMAC-signed links to ``/download/...``, which proxies the image bytes.
+
+    The secret is ``LENS_DOWNLOAD_SECRET`` or random per process (links then die on restart,
+    which is fine for one-hour links).
+    """
+
+    def __init__(
+        self,
+        secret: bytes | None = None,
+        base_url: str | None = None,
+        ttl: int = DOWNLOAD_TTL_SECONDS,
+    ) -> None:
+        env_secret = os.environ.get("LENS_DOWNLOAD_SECRET", "").encode()
+        self._secret = secret or env_secret or secrets.token_bytes(32)
+        port = os.environ.get("PORT", "8000")
+        base = base_url or os.environ.get("LENS_BASE_URL") or f"http://localhost:{port}"
+        self.base_url = base.rstrip("/")
+        self.ttl = ttl
+
+    def _signature(self, provider: str, photo_id: str, size: str, expires: int) -> str:
+        message = f"{provider}/{photo_id}/{size}/{expires}".encode()
+        return hmac.new(self._secret, message, hashlib.sha256).hexdigest()
+
+    def sign(self, provider: str, photo_id: str, size: str) -> tuple[str, int]:
+        expires = int(time.time()) + self.ttl
+        signature = self._signature(provider, photo_id, size, expires)
+        path = f"/download/{provider}/{photo_id}/{size}?expires={expires}&sig={signature}"
+        return self.base_url + path, expires
+
+    def verify(self, provider: str, photo_id: str, size: str, expires: str, signature: str) -> bool:
+        if not expires.isdigit() or int(expires) < time.time():
+            return False
+        expected = self._signature(provider, photo_id, size, int(expires))
+        return hmac.compare_digest(expected, signature)
+
+
+def _extension(url: str) -> str:
+    suffix = PurePosixPath(urlsplit(url).path).suffix.lower()
+    return suffix if suffix in {".jpg", ".jpeg", ".png", ".webp"} else ".jpg"
+
+
+def _source(provider: str | None, cache: ResponseCache) -> DirectSource:
+    # Keys are resolved per call so rotated secrets apply without a restart.
+    return DirectSource(provider or load_config().provider, cache=cache)
+
+
 def _summary(photo: Photo) -> dict[str, Any]:
     return {
         "id": photo.id,
@@ -141,13 +195,18 @@ async def _call(fn: Callable[[], T]) -> T:
         raise ToolError(str(exc)) from exc
 
 
-def build_mcp(auth: AuthProvider | None, *, cache: ResponseCache | None = None) -> FastMCP:
+def build_mcp(
+    auth: AuthProvider | None,
+    *,
+    cache: ResponseCache | None = None,
+    signer: DownloadSigner | None = None,
+) -> FastMCP:
     mcp = FastMCP("lens", instructions=INSTRUCTIONS, version=__version__, auth=auth)
     cache = cache or ResponseCache()
+    signer = signer or DownloadSigner()
 
     def source(provider: str | None) -> DirectSource:
-        # Keys are resolved per call so rotated secrets apply without a restart.
-        return DirectSource(provider or load_config().provider, cache=cache)
+        return _source(provider, cache)
 
     @mcp.tool(annotations=READ)
     async def search_photos(
@@ -187,23 +246,93 @@ def build_mcp(auth: AuthProvider | None, *, cache: ResponseCache | None = None) 
         ]
 
     @mcp.tool(annotations=READ)
+    async def download_photo(
+        photo_id: PhotoId,
+        size: Annotated[
+            str, Field(description="A size from the photo's `sizes`; `large` suits most pages.")
+        ] = "large",
+        provider: ProviderName = None,
+    ) -> dict[str, Any]:
+        """A one-hour link that serves the image file from this server, so you only need
+        network access to this server, not to the photo provider. Fetch it right away with
+        something like `curl -fsSL -o <filename> '<download_url>'`, and keep the
+        `credit_markdown` with the image."""
+        photo = await _call(lambda: source(provider).get(photo_id))
+        if size not in photo.downloads:
+            raise ToolError(f"Unknown size {size!r}; available: {', '.join(photo.downloads)}.")
+        url, expires = signer.sign(photo.provider, photo.id, size)
+        return {
+            "download_url": url,
+            "expires_at": expires,
+            "filename": f"{photo.provider}-{photo.id}{_extension(photo.downloads[size])}",
+            "width": photo.width,
+            "height": photo.height,
+            "alt": photo.alt,
+            "source_url": photo.source_url,
+            "credit_markdown": photo.credit_markdown,
+        }
+
+    @mcp.tool(annotations=READ)
     async def get_photo(photo_id: PhotoId, provider: ProviderName = None) -> dict[str, Any]:
-        """Full metadata for one photo, including `downloads` (a URL per size; `large` is a
-        good default). Download the file promptly rather than hotlinking, and keep its
+        """Full metadata for one photo, including provider `downloads` URLs (these need
+        network access to the provider; use `download_photo` if you don't have it). Keep its
         `credit_markdown` with the image."""
         return asdict(await _call(lambda: source(provider).get(photo_id)))
 
     return mcp
 
 
-def build_app() -> Starlette:
-    mcp_app = build_mcp(build_auth()).http_app(path="/mcp")
+def build_app(
+    *, cache: ResponseCache | None = None, signer: DownloadSigner | None = None
+) -> Starlette:
+    cache = cache or ResponseCache()
+    signer = signer or DownloadSigner()
+    mcp_app = build_mcp(build_auth(), cache=cache, signer=signer).http_app(path="/mcp")
 
     async def healthz(_: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "version": __version__})
 
+    async def download(request: Request) -> Response:
+        provider = request.path_params["provider"]
+        photo_id = request.path_params["photo_id"]
+        size = request.path_params["size"]
+        valid = (
+            provider in PROVIDERS
+            and SAFE_ID.fullmatch(photo_id)
+            and SAFE_ID.fullmatch(size)
+            and signer.verify(
+                provider,
+                photo_id,
+                size,
+                request.query_params.get("expires", ""),
+                request.query_params.get("sig", ""),
+            )
+        )
+        if not valid:
+            return JSONResponse({"error": "Invalid or expired download link."}, status_code=403)
+
+        def fetch() -> tuple[Photo, bytes, str]:
+            photo = _source(provider, cache).get(photo_id)
+            content, mime = fetch_image(photo, size)
+            return photo, content, mime
+
+        try:
+            photo, content, mime = await anyio.to_thread.run_sync(fetch)
+        except LensError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=exc.status)
+        filename = f"{photo.provider}-{photo.id}{EXTENSIONS[mime]}"
+        headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, max-age=3600",
+        }
+        return Response(content, media_type=mime, headers=headers)
+
     return Starlette(
-        routes=[Route("/healthz", healthz), Mount("/", app=mcp_app)],
+        routes=[
+            Route("/healthz", healthz),
+            Route("/download/{provider}/{photo_id}/{size}", download),
+            Mount("/", app=mcp_app),
+        ],
         lifespan=mcp_app.lifespan,
     )
 

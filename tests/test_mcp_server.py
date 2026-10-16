@@ -8,7 +8,13 @@ from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 from starlette.testclient import TestClient
 
-from lens.mcp_server import StaticBearerVerifier, build_app, build_auth, build_mcp
+from lens.mcp_server import (
+    DownloadSigner,
+    StaticBearerVerifier,
+    build_app,
+    build_auth,
+    build_mcp,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -81,3 +87,40 @@ def test_token_auth_guards_mcp_but_not_healthz(monkeypatch: pytest.MonkeyPatch) 
     with TestClient(build_app()) as http:
         assert http.get("/healthz").json()["ok"] is True
         assert http.post("/mcp", json={}).status_code == 401
+
+
+async def test_download_photo_link_serves_the_image_through_lens(
+    pixabay: list[httpx.Request], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LENS_MCP_AUTH", "none")
+    signer = DownloadSigner(b"s" * 32, base_url="https://lens.example.com")
+    async with Client(build_mcp(None, signer=signer)) as client:
+        result = await client.call_tool("download_photo", {"photo_id": "123"})
+    link = result.data
+    assert link["download_url"].startswith("https://lens.example.com/download/pixabay/123/large?")
+    assert link["filename"] == "pixabay-123.jpg"
+    assert link["credit_markdown"].startswith("Photo by [Sample Person]")
+
+    path = link["download_url"].removeprefix("https://lens.example.com")
+    with TestClient(build_app(signer=signer)) as http:
+        response = http.get(path)
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/jpeg"
+        assert response.content == jpeg()
+        assert http.get(path.replace("sig=", "sig=0")).status_code == 403
+        assert http.get(path.replace("/large?", "/small?")).status_code == 403
+    assert pixabay[-1].url.host == "pixabay.com"
+    assert pixabay[-1].url.path == "/get/large.jpg"
+
+
+async def test_download_photo_rejects_unknown_sizes(pixabay: list[httpx.Request]) -> None:
+    async with Client(build_mcp(None)) as client:
+        with pytest.raises(ToolError, match="Unknown size"):
+            await client.call_tool("download_photo", {"photo_id": "123", "size": "huge"})
+
+
+def test_expired_download_links_are_rejected() -> None:
+    signer = DownloadSigner(b"s" * 32, ttl=-1)
+    url, expires = signer.sign("pixabay", "123", "large")
+    signature = url.rsplit("sig=", 1)[1]
+    assert not signer.verify("pixabay", "123", "large", str(expires), signature)
