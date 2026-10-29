@@ -1,6 +1,6 @@
 # lens
 
-Easy stock-photo access for AI agents. One CLI searches, previews, and downloads photos with the attribution already worked out, so an agent can illustrate a blog post or a web page without extra setup. It also runs as a remote MCP server, so Claude can use it as a connector. Pixabay is the default provider and Pexels is also supported. Every command prints JSON.
+Easy stock-photo and stock-music access for AI agents. One CLI searches, previews, and downloads photos with the attribution already worked out, so an agent can illustrate a blog post or a web page without extra setup. It also runs as a remote MCP server, so Claude can use it as a connector, and that server keeps a shared stock audio library. Pixabay is the default provider and Pexels is also supported. Every command prints JSON.
 
 ## Quick start
 
@@ -79,12 +79,29 @@ token_command = "my-app auth token"   # prints a bearer token, like a git creden
 | `LENS_ALLOWED_GITHUB_LOGINS` | Comma-separated GitHub usernames allowed in. Everyone else is rejected. |
 | `LENS_BASE_URL` | Public URL, such as `https://lens-production.up.railway.app`. |
 | `LENS_MCP_TOKEN` | The bearer token for `LENS_MCP_AUTH=token` (at least 32 characters). |
-| `LENS_DOWNLOAD_SECRET` | Optional key for signing download links. Unset, a random key is made at startup, so links stop working after a restart. |
+| `LENS_DOWNLOAD_SECRET` | Optional key for signing download and upload links. Unset, a random key is made at startup, so links stop working after a restart. |
+| `BUCKET_NAME`, `BUCKET_ENDPOINT`, `BUCKET_REGION`, `BUCKET_ACCESS_KEY_ID`, `BUCKET_SECRET_ACCESS_KEY` | The S3-compatible bucket for the audio library. Unset, tracks are kept under the cache directory. |
 | `PORT` | Listen port (default 8000). |
+
+### Audio library
+
+The MCP server also keeps a shared library of stock music for videos and reels, so every project can reuse the same licensed tracks. Each track is stored in the bucket as its audio file plus a JSON record: title, artist, moods, genre, energy, bpm, tags, notes, license, source page, and credit, with the length, size, and checksum measured on upload.
+
+| Tool | Purpose |
+| --- | --- |
+| `search_tracks` | Find tracks by words, mood, energy, length, or bpm |
+| `list_tracks` | Every track (optionally including ones still waiting for audio) |
+| `get_track` | All metadata for one track |
+| `download_track` | A one-hour signed link to the audio file, served by this server |
+| `add_track` | Record a track's metadata and get a one-hour signed `upload_url`; PUT the file there (`curl -fsS -X PUT --data-binary @song.mp3 '<upload_url>'`) |
+| `upload_track` | A fresh upload link, to retry or replace a track's file |
+| `update_track` / `delete_track` | Edit metadata, or remove a track |
+
+Uploads accept MP3, M4A, WAV, Ogg, Opus, and FLAC up to 50 MB. A track appears in searches once its audio is uploaded. Always record the license and source page when adding a track.
 
 Locally: `LENS_MCP_AUTH=none uv run --extra mcp lens-mcp`, then connect to `http://localhost:8000/mcp`.
 
-**Deploy on Railway.** Create a service from this repo; the `Dockerfile` and `railway.toml` are picked up. Add a volume mounted at `/data`, which holds OAuth client registrations (`FASTMCP_HOME`) and the Pixabay response cache (`LENS_CACHE_DIR`). Generate a domain, create the GitHub OAuth app for it, and set the variables above. `/healthz` is the health check.
+**Deploy on Railway.** Create a service from this repo; the `Dockerfile` and `railway.toml` are picked up. Add a volume mounted at `/data`, which holds OAuth client registrations (`FASTMCP_HOME`) and the Pixabay response cache (`LENS_CACHE_DIR`). Add a Storage Bucket for the audio library and point the `BUCKET_*` variables at it with references such as `${{audio.BUCKET}}`. Generate a domain, create the GitHub OAuth app for it, and set the variables above. `/healthz` is the health check.
 
 **Connect.** In claude.ai, open Settings, then Connectors, choose Add custom connector, and enter `https://<host>/mcp`; you sign in through GitHub. For Claude Code, run `claude mcp add --transport http lens https://<host>/mcp`.
 
