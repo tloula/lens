@@ -20,7 +20,13 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for name in ("PIXABAY", "PEXELS"):
         monkeypatch.delenv(f"{name}_API_KEY", raising=False)
         monkeypatch.delenv(f"LENS_{name}_API_KEY", raising=False)
-    for name in ("LENS_BACKEND", "LENS_PROVIDER", "LENS_TOKEN_COMMAND", "LENS_BACKEND_TOKEN"):
+    for name in (
+        "LENS_BACKEND",
+        "LENS_PROVIDER",
+        "LENS_TOKEN_COMMAND",
+        "LENS_BACKEND_TOKEN",
+        "BUCKET_NAME",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LENS_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("LENS_CONFIG", str(tmp_path / "config.toml"))

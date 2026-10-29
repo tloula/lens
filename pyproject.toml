@@ -1,7 +1,7 @@
 [project]
 name = "lens"
 version = "0.1.0"
-description = "Stock photo search and download for agents, as a CLI and a Python library."
+description = "Stock photo search and download for agents, plus a shared stock audio library over MCP."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -15,7 +15,9 @@ dependencies = [
 [project.optional-dependencies]
 server = ["fastapi>=0.115"]
 mcp = [
+    "boto3>=1.35",
     "fastmcp>=4.1",
+    "mutagen>=1.47",
     "uvicorn>=0.30",
 ]
 
@@ -29,8 +31,11 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "boto3>=1.35",
     "fastapi>=0.115",
     "fastmcp>=4.1",
+    "moto[s3]>=5",
+    "mutagen>=1.47",
     "pyright>=1.1.390",
     "pytest>=8.0",
     "ruff>=0.8",
