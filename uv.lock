@@ -942,7 +942,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", marker = "extra == 'mcp'", specifier = ">=1.35" },
+    { name = "boto3", marker = "extra == 'mcp'", specifier = ">=1.36" },
     { name = "click", specifier = ">=8.1" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=4.1" },
@@ -956,7 +956,7 @@ provides-extras = ["server", "mcp"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "boto3", specifier = ">=1.35" },
+    { name = "boto3", specifier = ">=1.36" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastmcp", specifier = ">=4.1" },
     { name = "moto", extras = ["s3"], specifier = ">=5" },

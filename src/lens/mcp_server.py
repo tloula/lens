@@ -71,8 +71,15 @@ ProviderName = Annotated[
 PhotoId = Annotated[str, Field(description="A photo `id` from search_photos.")]
 TrackId = Annotated[str, Field(description="A track `id` from search_tracks or list_tracks.")]
 Moods = Annotated[
-    list[str] | None,
-    Field(description="Mood words, such as upbeat, romantic, chill, spooky, cinematic."),
+    list[Annotated[str, Field(max_length=40)]] | None,
+    Field(
+        max_length=20,
+        description="Mood words, such as upbeat, romantic, chill, spooky, cinematic.",
+    ),
+]
+Tags = Annotated[
+    list[Annotated[str, Field(max_length=40)]] | None,
+    Field(max_length=30, description="Other words to search by, such as halloween or reel."),
 ]
 
 
@@ -163,20 +170,24 @@ class DownloadSigner:
         self.base_url = base.rstrip("/")
         self.ttl = ttl
 
-    def _signature(self, method: str, path: str, expires: int) -> str:
-        message = f"{method} {path} {expires}".encode()
+    def _signature(self, method: str, path: str, expires: int, rev: str) -> str:
+        message = f"{method} {path} {expires} {rev}".encode()
         return hmac.new(self._secret, message, hashlib.sha256).hexdigest()
 
-    def sign_path(self, method: str, path: str) -> tuple[str, int]:
+    def sign_path(self, method: str, path: str, *, rev: str | None = None) -> tuple[str, int]:
+        """``rev`` binds the link to a version of the target; it is checked by the route."""
         expires = int(time.time()) + self.ttl
-        signature = self._signature(method, path, expires)
-        return f"{self.base_url}{path}?expires={expires}&sig={signature}", expires
+        signature = self._signature(method, path, expires, rev or "")
+        query = f"expires={expires}" + (f"&rev={rev}" if rev is not None else "")
+        return f"{self.base_url}{path}?{query}&sig={signature}", expires
 
-    def verify_path(self, method: str, path: str, expires: str, signature: str) -> bool:
-        if not expires.isdigit() or int(expires) < time.time():
+    def verify_path(
+        self, method: str, path: str, expires: str, signature: str, *, rev: str = ""
+    ) -> bool:
+        if not (expires.isascii() and expires.isdigit()) or int(expires) < time.time():
             return False
-        expected = self._signature(method, path, int(expires))
-        return hmac.compare_digest(expected, signature)
+        expected = self._signature(method, path, int(expires), rev)
+        return hmac.compare_digest(expected.encode(), signature.encode())
 
     def sign(self, provider: str, photo_id: str, size: str) -> tuple[str, int]:
         return self.sign_path("GET", f"/download/{provider}/{photo_id}/{size}")
@@ -246,7 +257,8 @@ def build_mcp(
     library = library or AudioLibrary()
 
     def upload_link(track: Track) -> dict[str, Any]:
-        url, expires = signer.sign_path("PUT", f"/audio/{track.id}")
+        # Signed against the current audio checksum, so the link stops working once used.
+        url, expires = signer.sign_path("PUT", f"/audio/{track.id}", rev=track.sha256)
         return {
             "upload_url": url,
             "upload_expires_at": expires,
@@ -414,9 +426,7 @@ def build_mcp(
         genre: Annotated[str, Field(max_length=100)] = "",
         energy: Energy | None = None,
         bpm: Annotated[int | None, Field(ge=20, le=300)] = None,
-        tags: Annotated[
-            list[str] | None, Field(description="Other words to search by, such as halloween.")
-        ] = None,
+        tags: Tags = None,
         notes: Annotated[
             str, Field(max_length=1000, description="What it suits, best sections, and so on.")
         ] = "",
@@ -462,16 +472,17 @@ def build_mcp(
         artist: Annotated[str | None, Field(max_length=200)] = None,
         license: Annotated[str | None, Field(min_length=1, max_length=200)] = None,
         source_url: Annotated[str | None, Field(max_length=500)] = None,
-        moods: Annotated[list[str] | None, Field(description="Replaces the mood list.")] = None,
+        moods: Moods = None,
         genre: Annotated[str | None, Field(max_length=100)] = None,
         energy: Energy | None = None,
         bpm: Annotated[int | None, Field(ge=20, le=300)] = None,
-        tags: Annotated[list[str] | None, Field(description="Replaces the tag list.")] = None,
+        tags: Tags = None,
         notes: Annotated[str | None, Field(max_length=1000)] = None,
         license_url: Annotated[str | None, Field(max_length=500)] = None,
         credit: Annotated[str | None, Field(max_length=500)] = None,
     ) -> dict[str, Any]:
-        """Change a track's metadata. Only the fields you pass change."""
+        """Change a track's metadata. Only the fields you pass change; lists you pass replace
+        the old ones."""
         changes = {
             name: value
             for name, value in {
@@ -554,25 +565,33 @@ def build_app(
     async def audio(request: Request) -> Response:
         track_id = request.path_params["track_id"]
         path = f"/audio/{track_id}"
+        rev = request.query_params.get("rev", "")
         if not signer.verify_path(
             request.method,
             path,
             request.query_params.get("expires", ""),
             request.query_params.get("sig", ""),
+            rev=rev,
         ):
             return JSONResponse({"error": "Invalid or expired link."}, status_code=403)
         try:
             if request.method == "PUT":
                 declared = request.headers.get("content-length", "")
-                if declared.isdigit() and int(declared) > MAX_AUDIO_BYTES:
-                    raise LensError("Audio must be between 1 byte and 50 MB.", status=413)
-                body = bytearray()
+                too_big = LensError("Audio must be 50 MB or smaller.", status=413)
+                if declared.isascii() and declared.isdigit() and int(declared) > MAX_AUDIO_BYTES:
+                    raise too_big
+                chunks: list[bytes] = []
+                size = 0
                 async for chunk in request.stream():
-                    body.extend(chunk)
-                    if len(body) > MAX_AUDIO_BYTES:
-                        raise LensError("Audio must be between 1 byte and 50 MB.", status=413)
-                content = bytes(body)
-                track = await anyio.to_thread.run_sync(lambda: library.upload(track_id, content))
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size > MAX_AUDIO_BYTES:
+                        raise too_big
+                content = b"".join(chunks)
+                del chunks
+                track = await anyio.to_thread.run_sync(
+                    lambda: library.upload(track_id, content, expected_sha256=rev)
+                )
                 return JSONResponse({"track": _track_summary(track)})
             track, content = await anyio.to_thread.run_sync(lambda: library.audio(track_id))
         except LensError as exc:

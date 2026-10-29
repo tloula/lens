@@ -95,6 +95,8 @@ def test_metadata_survives_a_restart_and_rejects_bad_input(library: AudioLibrary
         library.upload(track.id, b"not audio")
     with pytest.raises(LensError, match="No track"):
         library.get("../secrets")
+    library.store.put("audio/bad.json", b'{"id": "bad", "bpm": "fast"}', "application/json")
+    assert AudioLibrary(library.store).search(include_pending=True)[0].id == track.id
 
 
 def test_delete_removes_audio_and_metadata(library: AudioLibrary) -> None:
@@ -142,6 +144,11 @@ async def test_mcp_add_upload_search_download(
             response = http.put(upload, content=wav())
             assert response.status_code == 200
             assert response.json()["track"]["duration_seconds"] == 2.0
+            # Upload links are single-use: once the audio changes, the old link is refused.
+            assert http.put(upload, content=wav(1)).status_code == 409
+            fresh = (await client.call_tool("upload_track", {"track_id": track_id})).data
+            response = http.put(fresh["upload_url"].removeprefix(BASE), content=wav())
+            assert response.status_code == 200
             # An upload link can't be used to download, and the reverse.
             assert http.get(upload).status_code == 403
 

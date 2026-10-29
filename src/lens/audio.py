@@ -193,7 +193,15 @@ class Track:
             track = cls(**{k: v for k, v in data.items() if k in known})
         except TypeError as exc:
             raise LensError("Invalid track metadata.") from exc
-        if not TRACK_ID.fullmatch(track.id):
+        valid = (
+            TRACK_ID.fullmatch(track.id)
+            and track.extension in {"", *(ext for _, ext in FORMATS.values())}
+            and all(isinstance(getattr(track, name), str) for name in STRING_FIELDS)
+            and all(isinstance(v, str) for v in [*track.moods, *track.tags])
+            and (track.bpm is None or type(track.bpm) is int)
+            and (track.duration_seconds is None or isinstance(track.duration_seconds, int | float))
+        )
+        if not valid:
             raise LensError("Invalid track metadata.")
         return track
 
@@ -215,6 +223,22 @@ class Track:
     def matches(self, terms: set[str]) -> bool:
         haystack = _words(self.title, self.artist, self.genre, self.notes, *self.moods, *self.tags)
         return terms <= haystack
+
+
+STRING_FIELDS = (
+    "title",
+    "artist",
+    "license",
+    "source_url",
+    "genre",
+    "notes",
+    "license_url",
+    "credit",
+    "content_type",
+    "sha256",
+    "added_at",
+    "updated_at",
+)
 
 
 def _clean_list(values: list[str] | None) -> list[str]:
@@ -243,8 +267,10 @@ def probe_audio(content: bytes) -> tuple[str, str, float]:
     """Return ``(content_type, extension, duration_seconds)``, or raise ``LensError``."""
     import mutagen
 
-    if not content or len(content) > MAX_AUDIO_BYTES:
-        raise LensError("Audio must be between 1 byte and 50 MB.", status=413)
+    if not content:
+        raise LensError("The upload was empty.", status=422)
+    if len(content) > MAX_AUDIO_BYTES:
+        raise LensError("Audio must be 50 MB or smaller.", status=413)
     try:
         audio = mutagen.File(BytesIO(content))  # pyright: ignore[reportPrivateImportUsage]
     except mutagen.MutagenError:  # pyright: ignore[reportPrivateImportUsage]
@@ -259,29 +285,43 @@ def probe_audio(content: bytes) -> tuple[str, str, float]:
 class AudioLibrary:
     """Track metadata and audio in a ``Store``, with an in-memory index of the metadata.
 
-    The index reloads every few minutes so edits made straight in the bucket show up.
+    The index reloads every few minutes so edits made straight in the bucket show up. Writes
+    hold one lock and re-read the record inside it, so a delete during an upload can't bring a
+    track back and concurrent edits don't overwrite each other.
     """
 
     def __init__(self, store: Store | None = None) -> None:
         self.store = store or default_store()
         self._lock = threading.Lock()
+        self._write_lock = threading.RLock()
         self._tracks: dict[str, Track] = {}
         self._loaded_at: float | None = None
 
+    def _load(self) -> dict[str, Track]:
+        tracks: dict[str, Track] = {}
+        for key in self.store.keys(PREFIX):
+            if key.endswith(".json") and (raw := self.store.get(key)):
+                try:
+                    track = Track.from_dict(json.loads(raw))
+                except (LensError, ValueError, AttributeError):
+                    continue
+                tracks[track.id] = track
+        return tracks
+
     def _index(self) -> dict[str, Track]:
+        """A snapshot of the index, reloaded from the store when it is stale."""
         with self._lock:
-            if self._loaded_at is None or time.monotonic() - self._loaded_at > INDEX_TTL_SECONDS:
-                tracks: dict[str, Track] = {}
-                for key in self.store.keys(PREFIX):
-                    if key.endswith(".json") and (raw := self.store.get(key)):
-                        try:
-                            track = Track.from_dict(json.loads(raw))
-                        except (LensError, ValueError):
-                            continue
-                        tracks[track.id] = track
-                self._tracks = tracks
-                self._loaded_at = time.monotonic()
-            return self._tracks
+            fresh = (
+                self._loaded_at is not None
+                and time.monotonic() - self._loaded_at <= INDEX_TTL_SECONDS
+            )
+            if fresh:
+                return dict(self._tracks)
+        loaded = self._load()  # Outside the lock: N small reads from the bucket.
+        with self._lock:
+            self._tracks = loaded
+            self._loaded_at = time.monotonic()
+            return dict(loaded)
 
     def _save(self, track: Track) -> Track:
         track = replace(track, updated_at=_now())
@@ -328,31 +368,44 @@ class AudioLibrary:
 
     def add(self, **metadata: Any) -> Track:
         slug = re.sub(r"[^a-z0-9]+", "-", str(metadata.get("title", "")).lower())[:60].strip("-")
-        track_id = f"{slug or 'track'}-{secrets.token_hex(3)}"
-        track = _check(Track(id=track_id, added_at=_now(), **metadata))
-        return self._save(track)
+        with self._write_lock:
+            existing = self._index()
+            while (track_id := f"{slug or 'track'}-{secrets.token_hex(3)}") in existing:
+                pass
+            track = _check(Track(id=track_id, added_at=_now(), **metadata))
+            return self._save(track)
 
     def update(self, track_id: str, **changes: Any) -> Track:
-        track = _check(replace(self.get(track_id), **changes))
-        return self._save(track)
+        with self._write_lock:
+            track = _check(replace(self.get(track_id), **changes))
+            return self._save(track)
 
-    def upload(self, track_id: str, content: bytes) -> Track:
-        """Store (or replace) a track's audio and mark it ready."""
-        track = self.get(track_id)
+    def upload(self, track_id: str, content: bytes, *, expected_sha256: str | None = None) -> Track:
+        """Store (or replace) a track's audio and mark it ready.
+
+        ``expected_sha256`` makes it conditional: the upload only applies while the track's
+        current audio checksum (empty before the first upload) still matches.
+        """
+        self.get(track_id)
         content_type, extension, duration = probe_audio(content)
-        updated = replace(
-            track,
-            status="ready",
-            content_type=content_type,
-            extension=extension,
-            duration_seconds=duration,
-            size_bytes=len(content),
-            sha256=hashlib.sha256(content).hexdigest(),
-        )
-        self.store.put(updated.audio_key, content, content_type)
-        if track.extension and track.audio_key != updated.audio_key:
-            self.store.delete(track.audio_key)
-        return self._save(updated)
+        sha256 = hashlib.sha256(content).hexdigest()
+        with self._write_lock:
+            track = self.get(track_id)
+            if expected_sha256 is not None and track.sha256 != expected_sha256:
+                raise LensError("This upload link was already used; ask for a new one.", status=409)
+            updated = replace(
+                track,
+                status="ready",
+                content_type=content_type,
+                extension=extension,
+                duration_seconds=duration,
+                size_bytes=len(content),
+                sha256=sha256,
+            )
+            self.store.put(updated.audio_key, content, content_type)
+            if track.extension and track.audio_key != updated.audio_key:
+                self.store.delete(track.audio_key)
+            return self._save(updated)
 
     def audio(self, track_id: str) -> tuple[Track, bytes]:
         track = self.get(track_id)
@@ -362,9 +415,10 @@ class AudioLibrary:
         return track, content
 
     def delete(self, track_id: str) -> None:
-        track = self.get(track_id)
-        if track.extension:
-            self.store.delete(track.audio_key)
-        self.store.delete(f"{PREFIX}{track.id}.json")
-        with self._lock:
-            self._tracks.pop(track.id, None)
+        with self._write_lock:
+            track = self.get(track_id)
+            if track.extension:
+                self.store.delete(track.audio_key)
+            self.store.delete(f"{PREFIX}{track.id}.json")
+            with self._lock:
+                self._tracks.pop(track.id, None)
